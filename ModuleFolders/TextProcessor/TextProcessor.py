@@ -3,6 +3,7 @@ import os
 import re
 from typing import List, Dict, Tuple, Any, Optional
 
+
 class TextProcessor():
     # 定义日语字符集的正则表达式
     JAPANESE_CHAR_SET_CONTENT = (
@@ -24,6 +25,10 @@ class TextProcessor():
     RE_DIGITAL_SEQ_REC_STR = r'^【(\d+)】'
     RE_WHITESPACE_AFFIX_STR = r'^(\s*)(.*?)(\s*)$'
 
+    # 新增：标签处理正则表达式
+    RE_SINGLE_TAG_PATTERN_STR = r'^(<[^:>]+:)(.*?)(>)$'
+    RE_MULTI_TAG_PATTERN_STR = r'(<[^:>]+:)(.*?)(>)'
+
     def __init__(self, config: Any):
         super().__init__()
 
@@ -35,6 +40,10 @@ class TextProcessor():
 
         # 多行处理正则（使用MULTILINE标志）
         self.RE_WHITESPACE_AFFIX = re.compile(self.RE_WHITESPACE_AFFIX_STR, re.MULTILINE)
+
+        # 新增：预编译标签处理正则
+        self.RE_SINGLE_TAG_PATTERN = re.compile(self.RE_SINGLE_TAG_PATTERN_STR, re.DOTALL)
+        self.RE_MULTI_TAG_PATTERN = re.compile(self.RE_MULTI_TAG_PATTERN_STR, re.DOTALL)
 
         # 日语字符处理正则
         ja_affix_pattern_str = (
@@ -64,6 +73,277 @@ class TextProcessor():
             re.compile(p_str, re.IGNORECASE | re.MULTILINE)
             for p_str in special_placeholder_pattern_strings if p_str
         ]
+
+    # ==================== 新增：标签处理相关方法 ====================
+
+    def _is_single_tag_only(self, text: str) -> bool:
+        """检查文本是否只包含一个标签（支持注释处理）"""
+        # 如果传入的text还没有去注释，先去注释
+        if '//' in text or '#' in text or '/*' in text:
+            text = self._remove_comments(text)
+
+        text_stripped = text.strip()
+
+        # 必须以 < 开头，> 结尾
+        if not (text_stripped.startswith('<') and text_stripped.endswith('>')):
+            return False
+
+        # 查找所有标签
+        matches = list(self.RE_MULTI_TAG_PATTERN.finditer(text_stripped))
+
+        # 只有一个标签，且这个标签覆盖整个文本
+        if len(matches) == 1:
+            match = matches[0]
+            return match.start() == 0 and match.end() == len(text_stripped)
+
+        return False
+
+    def _process_single_tag_content(self, text: str) -> Tuple[str, Optional[Dict]]:
+        """处理单个标签（支持注释处理）"""
+        # 先移除注释
+        text_without_comments = self._remove_comments(text)
+
+        if not self._is_single_tag_only(text_without_comments):
+            return text, None
+
+        text_stripped = text_without_comments.strip()
+        match = self.RE_SINGLE_TAG_PATTERN.match(text_stripped)
+        if not match:
+            return text, None
+
+        tag_prefix = match.group(1)
+        tag_content = match.group(2)
+        tag_suffix = match.group(3)
+
+        # 处理空白（基于去注释后的文本）
+        leading_ws = text_without_comments[:len(text_without_comments) - len(text_without_comments.lstrip())]
+        trailing_ws = text_without_comments[len(text_without_comments.rstrip()):]
+        content_leading_ws = tag_content[:len(tag_content) - len(tag_content.lstrip())]
+        content_trailing_ws = tag_content[len(tag_content.rstrip()):]
+        core_content = tag_content.strip()
+
+        tag_info = {
+            'type': 'single_tag',
+            'tag_prefix': tag_prefix,
+            'tag_suffix': tag_suffix,
+            'leading_whitespace': leading_ws,
+            'trailing_whitespace': trailing_ws,
+            'content_leading_whitespace': content_leading_ws,
+            'content_trailing_whitespace': content_trailing_ws,
+            'comments_removed': True  # 标记已移除注释
+        }
+
+        return core_content, tag_info
+
+    def _remove_comments(self, text: str) -> str:
+        """
+        移除文本中的注释
+        支持格式: // 注释, # 注释, /* 注释 */
+        """
+        # 按行处理，移除行注释
+        lines = text.split('\n')
+        cleaned_lines = []
+
+        for line in lines:
+            # 移除 // 注释
+            if '//' in line:
+                line = line.split('//')[0]
+
+            # 移除 # 注释（但要避免误删代码中的 # 符号）
+            # if '#' in line and not line.strip().startswith('#'):
+            #     # 简单检查：如果 # 前有空白，可能是注释
+            #     parts = line.split('#')
+            #     if len(parts) > 1 and parts[0].rstrip() != parts[0]:  # # 前有空白
+            #         line = parts[0]
+
+            cleaned_lines.append(line)
+
+        result = '\n'.join(cleaned_lines)
+
+        # 移除 /* */ 块注释
+        import re
+        result = re.sub(r'/\*.*?\*/', '', result, flags=re.DOTALL)
+
+        return result
+
+    def _process_multiple_tags_only(self, text: str) -> Tuple[str, Optional[Dict]]:
+        """处理仅包含多个标签的文本"""
+        # 先移除注释
+        text_without_comments = self._remove_comments(text)
+
+        matches = list(self.RE_MULTI_TAG_PATTERN.finditer(text_without_comments))
+
+        if len(matches) < 2:  # 少于2个标签，不处理
+            return text, None
+
+        # 检查是否整个文本只包含这些标签
+        reconstructed = ""
+        last_end = 0
+
+        for i, match in enumerate(matches):
+            # 添加标签前的内容
+            before_tag = text_without_comments[last_end:match.start()]
+            reconstructed += before_tag
+
+            # 添加标签
+            reconstructed += match.group(0)
+            last_end = match.end()
+
+        # 添加最后一个标签后的内容
+        after_last_tag = text_without_comments[last_end:]
+        reconstructed += after_last_tag
+
+        # 检查重建的内容是否与原文一致
+        if reconstructed != text_without_comments:
+            return text, None
+
+        # 检查标签外是否只有空白字符
+        content_between_tags = ""
+        last_end = 0
+        for match in matches:
+            content_between_tags += text_without_comments[last_end:match.start()]
+            last_end = match.end()
+        content_between_tags += text_without_comments[last_end:]
+
+        # 如果标签外有非空白内容，跳过处理
+        if content_between_tags.strip():
+            return text, None
+
+        # 提取所有标签信息
+        tag_infos = []
+        extracted_contents = []
+        separators = []
+        last_end = 0
+
+        for i, match in enumerate(matches):
+            # 记录标签前的分隔符
+            separator = text_without_comments[last_end:match.start()]
+            if i == 0:
+                # 第一个标签前的内容作为前缀
+                separators.append(separator)
+            else:
+                # 标签间的分隔符
+                separators.append(separator)
+
+            tag_prefix = match.group(1)
+            tag_content = match.group(2)
+            tag_suffix = match.group(3)
+
+            # 处理标签内容的首尾空白
+            content_leading_ws = tag_content[:len(tag_content) - len(tag_content.lstrip())]
+            content_trailing_ws = tag_content[len(tag_content.rstrip()):]
+            core_content = tag_content.strip()
+
+            tag_info = {
+                'index': i,
+                'tag_prefix': tag_prefix,
+                'tag_suffix': tag_suffix,
+                'content_leading_whitespace': content_leading_ws,
+                'content_trailing_whitespace': content_trailing_ws
+            }
+
+            tag_infos.append(tag_info)
+            extracted_contents.append(core_content)
+            last_end = match.end()
+
+        # 记录最后一个标签后的内容作为后缀
+        final_separator = text_without_comments[last_end:]
+        separators.append(final_separator)
+
+        # 合并内容用于翻译
+        combined_content = '\n===TAG_SEPARATOR===\n'.join(extracted_contents)
+
+        multi_tag_info = {
+            'type': 'multiple_tags',
+            'tag_infos': tag_infos,
+            'separators': separators,
+            'tag_count': len(tag_infos),
+            'comments_removed': True  # 标记已移除注释
+        }
+
+        return combined_content, multi_tag_info
+
+    def _process_tag_content(self, text: str) -> Tuple[str, Optional[Dict]]:
+        """统一标签处理入口"""
+        # 先尝试多标签（避免被单标签贪婪匹配）
+        multi_result, multi_info = self._process_multiple_tags_only(text)
+        if multi_info:
+            return multi_result, multi_info
+
+        # 再尝试单标签
+        single_result, single_info = self._process_single_tag_content(text)
+        if single_info:
+            return single_result, single_info
+
+        return text, None
+
+    def _restore_single_tag_content(self, content: str, tag_info: Dict) -> str:
+        """还原单标签"""
+        return (
+                tag_info['leading_whitespace'] +
+                tag_info['tag_prefix'] +
+                tag_info['content_leading_whitespace'] +
+                content +
+                tag_info['content_trailing_whitespace'] +
+                tag_info['tag_suffix'] +
+                tag_info['trailing_whitespace']
+        )
+
+    def _restore_multiple_tags(self, translated_content: str, multi_tag_info: Dict) -> str:
+        """还原多标签"""
+        tag_infos = multi_tag_info['tag_infos']
+        separators = multi_tag_info['separators']
+        expected_count = multi_tag_info['tag_count']
+
+        # 分割翻译结果
+        translated_parts = translated_content.split('\n===TAG_SEPARATOR===\n')
+
+        if len(translated_parts) != expected_count:
+            print(f"[Warning]: 多标签分割数量不匹配! 期望{expected_count}个，实际{len(translated_parts)}个")
+            while len(translated_parts) < expected_count:
+                translated_parts.append('')
+            translated_parts = translated_parts[:expected_count]
+
+        # 重建整个文本
+        result = ""
+
+        # 添加第一个标签前的内容
+        if separators:
+            result += separators[0]
+
+        # 重建每个标签
+        for i, tag_info in enumerate(tag_infos):
+            # 重建标签
+            if i < len(translated_parts):
+                translated_part = translated_parts[i]
+                restored_tag = (
+                        tag_info['tag_prefix'] +
+                        tag_info['content_leading_whitespace'] +
+                        translated_part +
+                        tag_info['content_trailing_whitespace'] +
+                        tag_info['tag_suffix']
+                )
+                result += restored_tag
+
+            # 添加标签后的分隔符（除了最后一个标签）
+            if i + 1 < len(separators):
+                result += separators[i + 1]
+
+        return result
+
+    def _restore_tag_content(self, content: str, tag_info: Dict) -> str:
+        """统一标签还原入口"""
+        if not tag_info:
+            return content
+
+        tag_type = tag_info.get('type')
+
+        if tag_type == 'single_tag':
+            return self._restore_single_tag_content(content, tag_info)
+        elif tag_type == 'multiple_tags':
+            return self._restore_multiple_tags(content, tag_info)
+
+        return content
 
     def _normalize_line_endings(self, text: str) -> Tuple[str, List[Tuple[int, str]]]:
         """
@@ -181,11 +461,13 @@ class TextProcessor():
         return prefix, core_text, suffix
 
     def _process_multiline_text(self, text: str, source_lang: str) -> Tuple[str, Dict]:
-        """处理多行文本"""
-        # 统一换行符
-        normalized_text, line_endings = self._normalize_line_endings(text)
+        """处理多行文本（集成标签处理功能）"""
 
-        # 按行分割
+        # 第一步：检查并处理标签格式
+        tag_processed_text, tag_info = self._process_tag_content(text)
+
+        # 第二步：对处理后的文本进行原有的多行空白处理
+        normalized_text, line_endings = self._normalize_line_endings(tag_processed_text)
         lines = normalized_text.split('\n')
 
         # 选择正则模式
@@ -241,22 +523,29 @@ class TextProcessor():
         # 返回用于翻译的文本（不包含空行和纯空白行）
         processed_text = '\n'.join(non_empty_lines)
 
-        return processed_text, {
-            'type': 'multiline',
+        # 构建处理信息
+        info = {
+            'type': 'multiline_with_tag' if tag_info else 'multiline',
             'line_endings': line_endings,
-            'lines_info': lines_info
+            'lines_info': lines_info,
+            'tag_info': tag_info
         }
+
+        return processed_text, info
 
     def _create_empty_info(self) -> Dict:
         """创建空的处理信息"""
         return {
             'type': 'single',
             'line_ending': '\n',
-            'lines_info': [{'prefix': '', 'suffix': '', 'is_empty': False}]
+            'lines_info': [{'prefix': '', 'suffix': '', 'is_empty': False}],
+            'tag_info': None
         }
 
     def _restore_multiline_text(self, text: str, info: Dict) -> str:
-        """还原多行文本"""
+        """还原多行文本（集成标签还原功能）"""
+
+        # 第一步：还原多行和空白格式
         translated_lines = text.split('\n')
         lines_info = info.get('lines_info', [])
         line_endings = info.get('line_endings', [])
@@ -288,9 +577,15 @@ class TextProcessor():
                     # 防护措施：如果翻译结果不够，使用空字符串
                     restored_lines.append('')
 
-        # 还原原始换行符
-        restored_text = '\n'.join(restored_lines)
-        return self._restore_line_endings(restored_text, line_endings)
+        multiline_restored = '\n'.join(restored_lines)
+        multiline_restored = self._restore_line_endings(multiline_restored, line_endings)
+
+        # 第二步：如果有标签信息，还原标签格式
+        tag_info = info.get('tag_info')
+        if tag_info:
+            return self._restore_tag_content(multiline_restored, tag_info)
+
+        return multiline_restored
 
     def _compile_translation_rules(self, rules_data: Optional[List[Dict]]) -> List[Dict]:
         compiled_rules = []
@@ -308,7 +603,8 @@ class TextProcessor():
             compiled_rules.append(new_rule)
         return compiled_rules
 
-    def _prepare_code_pattern_strings(self, exclusion_list_data: Optional[List[Dict]], regex_dir_path: str) -> List[str]:
+    def _prepare_code_pattern_strings(self, exclusion_list_data: Optional[List[Dict]], regex_dir_path: str) -> List[
+        str]:
         patterns: List[str] = []
 
         # 读取正则库内容
@@ -479,7 +775,8 @@ class TextProcessor():
                         if placeholder_text in restored_text:
                             restored_text = restored_text.replace(placeholder_text, original_text_val, 1)
                         else:
-                            print(f"[Warning]: Placeholder '{placeholder_text}' not found in text for key '{key}' during restoration. Original: '{original_text_val}'")
+                            print(
+                                f"[Warning]: Placeholder '{placeholder_text}' not found in text for key '{key}' during restoration. Original: '{original_text_val}'")
                 new_dic[key] = restored_text
         return new_dic
 
@@ -507,7 +804,8 @@ class TextProcessor():
                         else:
                             break
                 except Exception as e:
-                    print(f"[Warning]: 前缀正则匹配出现问题！！ Regex error for prefix pattern '{pattern_obj.pattern}' on key '{key}': {e}")
+                    print(
+                        f"[Warning]: 前缀正则匹配出现问题！！ Regex error for prefix pattern '{pattern_obj.pattern}' on key '{key}': {e}")
                     continue
 
             # 遍历预编译的后缀正则表达式
@@ -526,7 +824,8 @@ class TextProcessor():
                             current_text = current_text[:best_match.start()]
                             made_change = True
                 except Exception as e:
-                    print(f"[Warning]: 后缀正则匹配出现问题！！ Regex error for suffix pattern '{pattern_obj.pattern}' on key '{key}': {e}")
+                    print(
+                        f"[Warning]: 后缀正则匹配出现问题！！ Regex error for suffix pattern '{pattern_obj.pattern}' on key '{key}': {e}")
                     continue
 
             # 特殊情况：如果移除前后缀后，中间的核心文本变为空白内容，还原最少内容的前后缀。
@@ -664,7 +963,8 @@ class TextProcessor():
         return processed_text_dict, processing_info
 
     # 还原前后缀的空格与换行（支持多行）
-    def restore_affix_whitespace(self, processing_info: Dict[str, Dict], processed_dict: Dict[str, str]) -> Dict[str, str]:
+    def restore_affix_whitespace(self, processing_info: Dict[str, Dict], processed_dict: Dict[str, str]) -> Dict[
+        str, str]:
         restored_text_dict: Dict[str, str] = {}
 
         for key, core_text in processed_dict.items():
