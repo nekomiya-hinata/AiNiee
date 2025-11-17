@@ -26,8 +26,16 @@ class TextProcessor():
     RE_WHITESPACE_AFFIX_STR = r'^(\s*)(.*?)(\s*)$'
 
     # 新增：标签处理正则表达式
+    # 带冒号的单标签
     RE_SINGLE_TAG_PATTERN_STR = r'^(<[^:>]+:)(.*?)(>)$'
-    RE_MULTI_TAG_PATTERN_STR = r'(<[^:>]+:)(.*?)(>)'
+    # 所有标签格式
+    RE_MULTI_TAG_PATTERN_STR = r'(<[^>]+>)'
+
+    # 新增：区分两种标签类型的正则
+    # <name:content>
+    RE_COLON_TAG_PATTERN_STR = r'^(<[^:>]+:)(.*?)(>)$'
+    # <name>
+    RE_SIMPLE_TAG_PATTERN_STR = r'^(<[^:>]+>)$'
 
     def __init__(self, config: Any):
         super().__init__()
@@ -44,6 +52,10 @@ class TextProcessor():
         # 新增：预编译标签处理正则
         self.RE_SINGLE_TAG_PATTERN = re.compile(self.RE_SINGLE_TAG_PATTERN_STR, re.DOTALL)
         self.RE_MULTI_TAG_PATTERN = re.compile(self.RE_MULTI_TAG_PATTERN_STR, re.DOTALL)
+
+        # 新增：预编译新的标签类型正则
+        self.RE_COLON_TAG_PATTERN = re.compile(self.RE_COLON_TAG_PATTERN_STR, re.DOTALL)
+        self.RE_SIMPLE_TAG_PATTERN = re.compile(self.RE_SIMPLE_TAG_PATTERN_STR, re.DOTALL)
 
         # 日语字符处理正则
         ja_affix_pattern_str = (
@@ -88,7 +100,7 @@ class TextProcessor():
         if not (text_stripped.startswith('<') and text_stripped.endswith('>')):
             return False
 
-        # 查找所有标签
+        # 查找所有标签（包括有冒号和无冒号的）
         matches = list(self.RE_MULTI_TAG_PATTERN.finditer(text_stripped))
 
         # 只有一个标签，且这个标签覆盖整个文本
@@ -107,33 +119,58 @@ class TextProcessor():
             return text, None
 
         text_stripped = text_without_comments.strip()
-        match = self.RE_SINGLE_TAG_PATTERN.match(text_stripped)
-        if not match:
-            return text, None
 
-        tag_prefix = match.group(1)
-        tag_content = match.group(2)
-        tag_suffix = match.group(3)
+        # 判断标签类型
+        colon_match = self.RE_COLON_TAG_PATTERN.match(text_stripped)
+        simple_match = self.RE_SIMPLE_TAG_PATTERN.match(text_stripped)
 
-        # 处理空白（基于去注释后的文本）
-        leading_ws = text_without_comments[:len(text_without_comments) - len(text_without_comments.lstrip())]
-        trailing_ws = text_without_comments[len(text_without_comments.rstrip()):]
-        content_leading_ws = tag_content[:len(tag_content) - len(tag_content.lstrip())]
-        content_trailing_ws = tag_content[len(tag_content.rstrip()):]
-        core_content = tag_content.strip()
+        if colon_match:
+            # 带冒号的标签处理
+            tag_prefix = colon_match.group(1)
+            tag_content = colon_match.group(2)
+            tag_suffix = colon_match.group(3)
 
-        tag_info = {
-            'type': 'single_tag',
-            'tag_prefix': tag_prefix,
-            'tag_suffix': tag_suffix,
-            'leading_whitespace': leading_ws,
-            'trailing_whitespace': trailing_ws,
-            'content_leading_whitespace': content_leading_ws,
-            'content_trailing_whitespace': content_trailing_ws,
-            'comments_removed': True  # 标记已移除注释
-        }
+            # 处理空白（基于去注释后的文本）
+            leading_ws = text_without_comments[:len(text_without_comments) - len(text_without_comments.lstrip())]
+            trailing_ws = text_without_comments[len(text_without_comments.rstrip()):]
+            content_leading_ws = tag_content[:len(tag_content) - len(tag_content.lstrip())]
+            content_trailing_ws = tag_content[len(tag_content.rstrip()):]
+            core_content = tag_content.strip()
 
-        return core_content, tag_info
+            tag_info = {
+                'type': 'single_tag',
+                'tag_type': 'colon_tag',
+                'tag_prefix': tag_prefix,
+                'tag_suffix': tag_suffix,
+                'leading_whitespace': leading_ws,
+                'trailing_whitespace': trailing_ws,
+                'content_leading_whitespace': content_leading_ws,
+                'content_trailing_whitespace': content_trailing_ws,
+                'comments_removed': True
+            }
+            return core_content, tag_info
+
+        elif simple_match:
+            # 简单标签处理
+            full_tag = simple_match.group(1)
+
+            # 处理空白
+            leading_ws = text_without_comments[:len(text_without_comments) - len(text_without_comments.lstrip())]
+            trailing_ws = text_without_comments[len(text_without_comments.rstrip()):]
+
+            tag_info = {
+                'type': 'single_tag',
+                'tag_type': 'simple_tag',
+                'full_tag': full_tag,
+                'leading_whitespace': leading_ws,
+                'trailing_whitespace': trailing_ws,
+                'content_leading_whitespace': '',
+                'content_trailing_whitespace': '',
+                'comments_removed': True
+            }
+            return '', tag_info  # 简单标签返回空内容
+
+        return text, None
 
     def _remove_comments(self, text: str) -> str:
         """
@@ -209,7 +246,7 @@ class TextProcessor():
         if content_between_tags.strip():
             return text, None
 
-        # 提取所有标签信息
+        # 提取标签信息时区分两种类型
         tag_infos = []
         extracted_contents = []
         separators = []
@@ -225,25 +262,48 @@ class TextProcessor():
                 # 标签间的分隔符
                 separators.append(separator)
 
-            tag_prefix = match.group(1)
-            tag_content = match.group(2)
-            tag_suffix = match.group(3)
+            # 完整的标签内容
+            full_tag = match.group(0)
 
-            # 处理标签内容的首尾空白
-            content_leading_ws = tag_content[:len(tag_content) - len(tag_content.lstrip())]
-            content_trailing_ws = tag_content[len(tag_content.rstrip()):]
-            core_content = tag_content.strip()
+            # 判断标签类型
+            colon_match = self.RE_COLON_TAG_PATTERN.match(full_tag)
+            simple_match = self.RE_SIMPLE_TAG_PATTERN.match(full_tag)
 
-            tag_info = {
-                'index': i,
-                'tag_prefix': tag_prefix,
-                'tag_suffix': tag_suffix,
-                'content_leading_whitespace': content_leading_ws,
-                'content_trailing_whitespace': content_trailing_ws
-            }
+            if colon_match:
+                # 带冒号的标签
+                tag_prefix = colon_match.group(1)
+                tag_content = colon_match.group(2)
+                tag_suffix = colon_match.group(3)
+
+                content_leading_ws = tag_content[:len(tag_content) - len(tag_content.lstrip())]
+                content_trailing_ws = tag_content[len(tag_content.rstrip()):]
+                core_content = tag_content.strip()
+
+                tag_info = {
+                    'index': i,
+                    'tag_type': 'colon_tag',
+                    'tag_prefix': tag_prefix,
+                    'tag_suffix': tag_suffix,
+                    'content_leading_whitespace': content_leading_ws,
+                    'content_trailing_whitespace': content_trailing_ws
+                }
+                extracted_contents.append(core_content)
+
+            elif simple_match:
+                # 简单标签
+                tag_info = {
+                    'index': i,
+                    'tag_type': 'simple_tag',
+                    'full_tag': full_tag,
+                    'content_leading_whitespace': '',
+                    'content_trailing_whitespace': ''
+                }
+                extracted_contents.append('')  # 简单标签添加空字符串
+
+            else:
+                continue
 
             tag_infos.append(tag_info)
-            extracted_contents.append(core_content)
             last_end = match.end()
 
         # 记录最后一个标签后的内容作为后缀
@@ -258,7 +318,8 @@ class TextProcessor():
             'tag_infos': tag_infos,
             'separators': separators,
             'tag_count': len(tag_infos),
-            'comments_removed': True  # 标记已移除注释
+            # 标记已移除注释
+            'comments_removed': True
         }
 
         return combined_content, multi_tag_info
@@ -279,15 +340,26 @@ class TextProcessor():
 
     def _restore_single_tag_content(self, content: str, tag_info: Dict) -> str:
         """还原单标签"""
-        return (
-                tag_info['leading_whitespace'] +
-                tag_info['tag_prefix'] +
-                tag_info['content_leading_whitespace'] +
-                content +
-                tag_info['content_trailing_whitespace'] +
-                tag_info['tag_suffix'] +
-                tag_info['trailing_whitespace']
-        )
+        tag_type = tag_info.get('tag_type', 'colon_tag')
+
+        if tag_type == 'colon_tag':
+            return (
+                    tag_info['leading_whitespace'] +
+                    tag_info['tag_prefix'] +
+                    tag_info['content_leading_whitespace'] +
+                    content +
+                    tag_info['content_trailing_whitespace'] +
+                    tag_info['tag_suffix'] +
+                    tag_info['trailing_whitespace']
+            )
+        elif tag_type == 'simple_tag':
+            return (
+                    tag_info['leading_whitespace'] +
+                    tag_info['full_tag'] +
+                    tag_info['trailing_whitespace']
+            )
+
+        return content
 
     def _restore_multiple_tags(self, translated_content: str, multi_tag_info: Dict) -> str:
         """还原多标签"""
@@ -311,19 +383,28 @@ class TextProcessor():
         if separators:
             result += separators[0]
 
-        # 重建每个标签
+        # 重建每个标签，根据标签类型分别处理
         for i, tag_info in enumerate(tag_infos):
             # 重建标签
-            if i < len(translated_parts):
-                translated_part = translated_parts[i]
-                restored_tag = (
-                        tag_info['tag_prefix'] +
-                        tag_info['content_leading_whitespace'] +
-                        translated_part +
-                        tag_info['content_trailing_whitespace'] +
-                        tag_info['tag_suffix']
-                )
-                result += restored_tag
+            if tag_info['tag_type'] == 'colon_tag':
+                # 带冒号的标签
+                if i < len(translated_parts):
+                    translated_part = translated_parts[i]
+                    restored_tag = (
+                            tag_info['tag_prefix'] +
+                            tag_info['content_leading_whitespace'] +
+                            translated_part +
+                            tag_info['content_trailing_whitespace'] +
+                            tag_info['tag_suffix']
+                    )
+                else:
+                    restored_tag = tag_info['tag_prefix'] + tag_info['tag_suffix']
+
+            elif tag_info['tag_type'] == 'simple_tag':
+                # 简单标签，直接使用原标签
+                restored_tag = tag_info['full_tag']
+
+            result += restored_tag
 
             # 添加标签后的分隔符（除了最后一个标签）
             if i + 1 < len(separators):
